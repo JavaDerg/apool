@@ -1,12 +1,13 @@
 mod sync;
+#[cfg(test)]
+mod tests;
 
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use sync::*;
-use tokio::sync::{SemaphorePermit, TryAcquireError};
+use std::ops::{Deref, DerefMut};
 
 pub struct Pool<T: Sync, S: Sync> {
     state: Mutex<(usize, S)>,
@@ -20,18 +21,18 @@ pub struct PoolGuard<'a, T: Sync, S: Sync> {
     pool: &'a Pool<T, S>,
     id: usize,
     inner: OwnedMutexGuard<T>,
-    permit: SemaphorePermit<'a>,
+    _permit: SemaphorePermit<'a>,
 }
 
 pub struct PoolTransformer<T: Sync> {
-    spawn: SmallVec<[Box<dyn Future<Output = T> + Send + Sync + Unpin>; 4]>,
+    spawn: SmallVec<[Box<dyn Future<Output = T> + Send + Unpin>; 4]>,
 }
 
 impl<T: Sync, S: Sync> Pool<T, S> {
     pub fn new(
         max: usize,
         state: S,
-        transform: impl Fn(&mut S, &mut PoolTransformer<T>) + Send + Sync + 'static,
+        transform: impl Fn(&mut S, &mut PoolTransformer<T>) + Sync + 'static,
     ) -> Self {
         if max == 0 {
             panic!("max pool size is not allowed to be 0");
@@ -61,14 +62,18 @@ impl<T: Sync, S: Sync> Pool<T, S> {
             Some(entry) => entry,
             None => panic!("Obtaining a pool entry should not fail"),
         };
-        let (id, mutex) = entry.clone();
+
+        let PoolEntry { id, mutex } = entry.clone();
         llock.push_front(entry);
 
         PoolGuard {
             pool: self,
-            inner: mutex.lock_owned().await,
+            inner: match mutex.try_lock_owned() {
+                Ok(lock) => lock,
+                Err(_) => panic!("Invalid pool list order"),
+            },
             id,
-            permit,
+            _permit: permit,
         }
     }
 
@@ -89,7 +94,7 @@ impl<T: Sync, S: Sync> Pool<T, S> {
                 *id += 1;
                 llock.push_back(PoolEntry {
                     id: *id,
-                    inner: Arc::new(Mutex::new(item)),
+                    mutex: Arc::new(Mutex::new(item)),
                 });
             }
             drop(llock);
@@ -98,10 +103,23 @@ impl<T: Sync, S: Sync> Pool<T, S> {
     }
 }
 
-#[derive(Clone)]
 struct PoolEntry<T: Sync> {
     id: usize,
-    inner: Arc<Mutex<T>>,
+    mutex: Arc<Mutex<T>>,
+}
+
+impl<'a, T: Sync, S: Sync> Deref for PoolGuard<'a, T, S> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
+impl<'a, T: Sync, S: Sync> DerefMut for PoolGuard<'a, T, S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.inner
+    }
 }
 
 impl<'a, T: Sync, S: Sync> Drop for PoolGuard<'a, T, S> {
@@ -116,5 +134,14 @@ impl<'a, T: Sync, S: Sync> Drop for PoolGuard<'a, T, S> {
             let item = llock.remove(index).unwrap();
             llock.push_front(item);
         });
+    }
+}
+
+impl<T: Sync> Clone for PoolEntry<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            mutex: self.mutex.clone(),
+        }
     }
 }
