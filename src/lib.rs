@@ -8,28 +8,34 @@ use std::future::Future;
 use std::sync::Arc;
 use sync::*;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 
-pub struct Pool<T: Sync, S: Sync> {
+pub struct Pool<T: 'static + Sync + Send, S: Sync> {
     state: Mutex<(usize, S)>,
-    pool: Mutex<VecDeque<PoolEntry<T>>>,
-    used: Semaphore,
+    pool: Arc<Mutex<VecDeque<PoolEntry<T>>>>,
+    used: Arc<Semaphore>,
     max: usize,
     transformer: Box<dyn Fn(&mut S, &mut PoolTransformer<T>)>,
 }
 
-pub struct PoolGuard<'a, T: Sync, S: Sync> {
+pub struct PoolGuard<'a, T: 'static + Sync + Send, S: Sync> {
     pool: &'a Pool<T, S>,
     id: usize,
     inner: OwnedMutexGuard<T>,
-    _permit: SemaphorePermit<'a>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
-pub struct PoolTransformer<T: Sync> {
-    spawn: SmallVec<[Box<dyn Future<Output = T> + Send + Unpin>; 4]>,
+pub struct PoolTransformer<'a, T: 'static + Sync + Send> {
+    spawn: SmallVec<[Pin<Box<dyn Future<Output = T> + 'a>>; 4]>,
 }
 
-impl<T: Sync, S: Sync> Pool<T, S> {
-    pub fn new(
+struct PoolEntry<T: 'static + Sync + Send> {
+    id: usize,
+    mutex: Arc<Mutex<T>>,
+}
+
+impl<T: 'static + Sync + Send, S: Sync> Pool<T, S> {
+    pub fn new<'a>(
         max: usize,
         state: S,
         transform: impl Fn(&mut S, &mut PoolTransformer<T>) + Sync + 'static,
@@ -39,20 +45,20 @@ impl<T: Sync, S: Sync> Pool<T, S> {
         }
         Self {
             state: Mutex::new((0, state)),
-            pool: Mutex::new(VecDeque::with_capacity(max)),
-            used: Semaphore::new(0),
+            pool: Arc::new(Mutex::new(VecDeque::with_capacity(max))),
+            used: Arc::new(Semaphore::new(0)),
             max,
             transformer: Box::new(transform),
         }
     }
 
     pub async fn get(&self) -> PoolGuard<'_, T, S> {
-        let permit = match self.used.try_acquire() {
+        let permit = match self.used.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 self.try_spawn_new().await;
-                self.used
-                    .acquire()
+                self.used.clone()
+                    .acquire_owned()
                     .await
                     .expect("Semaphore should not be closed")
             }
@@ -73,7 +79,7 @@ impl<T: Sync, S: Sync> Pool<T, S> {
                 Err(_) => panic!("Invalid pool list order"),
             },
             id,
-            _permit: permit,
+            permit: Some(permit),
         }
     }
 
@@ -103,12 +109,13 @@ impl<T: Sync, S: Sync> Pool<T, S> {
     }
 }
 
-struct PoolEntry<T: Sync> {
-    id: usize,
-    mutex: Arc<Mutex<T>>,
+impl<'a, T: 'static + Sync + Send> PoolTransformer<'a, T> {
+    pub fn spawn(&mut self, future: impl Future<Output = T> + 'a) {
+        self.spawn.push(Box::pin(future));
+    }
 }
 
-impl<'a, T: Sync, S: Sync> Deref for PoolGuard<'a, T, S> {
+impl<'a, T: 'static + Sync + Send, S: Sync> Deref for PoolGuard<'a, T, S> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -116,28 +123,33 @@ impl<'a, T: Sync, S: Sync> Deref for PoolGuard<'a, T, S> {
     }
 }
 
-impl<'a, T: Sync, S: Sync> DerefMut for PoolGuard<'a, T, S> {
+impl<'a, T: 'static + Sync + Send, S: Sync> DerefMut for PoolGuard<'a, T, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut *self.inner
     }
 }
 
-impl<'a, T: Sync, S: Sync> Drop for PoolGuard<'a, T, S> {
+impl<'a, T: 'static + Sync + Send, S: Sync> Drop for PoolGuard<'a, T, S> {
     fn drop(&mut self) {
-        tokio::runtime::Handle::current().block_on(async {
-            let mut llock = self.pool.pool.lock().await;
+        let permit = self.permit.take().unwrap();
+        let mutex = self.pool.pool.clone();
+        let id = self.id;
+
+        tokio::runtime::Handle::current().spawn(async move {
+            let mut llock = mutex.lock().await;
             let index = (0usize..)
                 .zip(llock.iter())
-                .find(|item| item.1.id == self.id)
+                .find(|item| item.1.id == id)
                 .map(|item| item.0)
                 .unwrap();
             let item = llock.remove(index).unwrap();
-            llock.push_front(item);
+            llock.push_back(item);
+            drop(permit);
         });
     }
 }
 
-impl<T: Sync> Clone for PoolEntry<T> {
+impl<T: 'static + Sync + Send> Clone for PoolEntry<T> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,

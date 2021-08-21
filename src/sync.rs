@@ -8,4 +8,4 @@ pub type OwnedMutexGuard<T> = tokio::sync::OwnedMutexGuard<T>;
 pub type Semaphore = tokio::sync::Semaphore;
 
 #[cfg(feature = "tokio")]
-pub type SemaphorePermit<'a> = tokio::sync::SemaphorePermit<'a>;
+pub type OwnedSemaphorePermit = tokio::sync::OwnedSemaphorePermit;
