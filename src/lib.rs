@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 mod sync;
 #[cfg(test)]
 mod tests;
@@ -35,6 +37,21 @@ struct PoolEntry<T: 'static + Sync + Send> {
 }
 
 impl<T: 'static + Sync + Send, S: Sync> Pool<T, S> {
+    ///```
+    ///use apool::Pool;
+    ///
+    ///let pool = Pool::<usize, usize>::new(
+    ///    4,
+    ///    0,
+    ///    |state, transformer| {
+    ///        let i = *state;
+    ///        *state += 1;
+    ///        transformer.spawn(async move {
+    ///            i
+    ///        });
+    ///    },
+    ///);
+    /// ```
     pub fn new<'a>(
         max: usize,
         state: S,
