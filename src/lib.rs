@@ -17,7 +17,7 @@ pub struct Pool<T: 'static + Sync + Send, S: Sync> {
     pool: Arc<Mutex<VecDeque<PoolEntry<T>>>>,
     used: Arc<Semaphore>,
     max: usize,
-    transformer: Box<dyn Fn(&mut S, &mut PoolTransformer<T>)>,
+    transformer: Box<dyn Fn(&mut S, &mut PoolTransformer<T>) + Send + Sync + 'static>,
 }
 
 pub struct PoolGuard<'a, T: 'static + Sync + Send, S: Sync> {
@@ -55,7 +55,7 @@ impl<T: 'static + Sync + Send, S: Sync> Pool<T, S> {
     pub fn new<'a>(
         max: usize,
         state: S,
-        transform: impl Fn(&mut S, &mut PoolTransformer<T>) + Sync + 'static,
+        transform: impl Fn(&mut S, &mut PoolTransformer<T>) + Sync + Send +'static,
     ) -> Self {
         if max == 0 {
             panic!("max pool size is not allowed to be 0");

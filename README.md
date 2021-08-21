@@ -1,5 +1,5 @@
 # apool
-This crate allows you to create a Pool of any type `T: sSend + Sync` lazily.
+This crate allows you to create a Pool of any type `T: Send + Sync` lazily.
 When trying to acquire a `&mut T`
 - if no instances have been created yet a new one will be created,
 - if all instances are in use, a new instance will be created,
