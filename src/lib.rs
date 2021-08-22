@@ -28,7 +28,7 @@ pub struct PoolGuard<'a, T: 'static + Sync + Send, S: Sync> {
 }
 
 pub struct PoolTransformer<'a, T: 'static + Sync + Send> {
-    spawn: SmallVec<[Pin<Box<dyn Future<Output = T> + Send + Sync +'a>>; 4]>,
+    spawn: SmallVec<[Pin<Box<dyn Future<Output = T> + Send +'a>>; 4]>,
 }
 
 struct PoolEntry<T: 'static + Sync + Send> {
@@ -127,7 +127,7 @@ impl<T: 'static + Sync + Send, S: Sync> Pool<T, S> {
 }
 
 impl<'a, T: 'static + Sync + Send> PoolTransformer<'a, T> {
-    pub fn spawn(&mut self, future: impl Future<Output = T> + Send + Sync + 'a) {
+    pub fn spawn(&mut self, future: impl Future<Output = T> + Send + 'a) {
         self.spawn.push(Box::pin(future));
     }
 }
